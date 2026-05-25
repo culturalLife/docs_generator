@@ -1,0 +1,26 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# requirements.txt — VMCompatible Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+# Scoped ONLY to what the docs_gen pipeline actually uses.
+# Install on VM: pip install -r requirements.txt
+#
+# Versions are pinned to lower bounds (>=) for flexibility while preventing
+# known-breaking changes. For a fully reproducible deploy, pin to exact versions
+# after testing: pip freeze > requirements.lock.txt
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Web framework + ASGI server
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Mistral AI SDK (core only — no workflows extension needed for this pipeline)
+mistralai>=1.0.0
+
+# Word document generation
+python-docx>=1.1.2
+
+# Environment variable loading from .env file
+python-dotenv>=1.0.1
+
+# Data validation (FastAPI uses this internally too)
+pydantic>=2.7.0
