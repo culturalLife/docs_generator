@@ -2,6 +2,7 @@ import json
 import io
 from pathlib import Path
 from fastapi.testclient import TestClient
+# pyrefly: ignore [missing-import]
 from api import app
 
 client = TestClient(app)
