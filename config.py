@@ -15,6 +15,11 @@ from pathlib import Path
 # Absolute path to the VMCompatible folder — all relative paths resolve from here.
 BASE_DIR = Path(__file__).parent
 
+# ─── Input Mode ────────────────────────────────────────────────────────────────
+# Set to "file" to read prompt.md and data.json from disk.
+# Set to "api" to accept prompt and json_payload in the POST request body.
+INPUT_MODE: str = "api"
+
 # ─── Model Settings ────────────────────────────────────────────────────────────
 # Which Mistral model to use for report generation.
 # Options: "mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"

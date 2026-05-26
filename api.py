@@ -24,12 +24,21 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
+
 import config # pyrefly: ignore [missing-import]
 from logger import get_logger # pyrefly: ignore [missing-import]
 from summarize_data import clean_data_summary # pyrefly: ignore [missing-import]
 from report_generator import generate_report # pyrefly: ignore [missing-import]
 
 logger = get_logger("api")
+
+# ─── Request Schema ─────────────────────────────────────────────────────────────
+class GenerateDocsRequest(BaseModel):
+    prompt: Optional[str] = None
+    json_payload: Optional[Dict[str, Any]] = None
 
 # ─── App Initialization ─────────────────────────────────────────────────────────
 app = FastAPI(
@@ -44,6 +53,14 @@ app = FastAPI(
     # redoc_url=None,
 )
 
+# Enable CORS (Cross-Origin Resource Sharing)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins. For production, restrict this to specific domains.
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all HTTP methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
 
 # ─── Startup Validation ─────────────────────────────────────────────────────────
 @app.on_event("startup")
@@ -55,27 +72,37 @@ async def startup_checks():
     """
     errors = []
 
-    if not config.PROMPT_FILE_PATH.exists():
-        errors.append(f"Prompt file not found: {config.PROMPT_FILE_PATH}")
-    if not config.JSON_PAYLOAD_PATH.exists():
-        errors.append(f"JSON payload not found: {config.JSON_PAYLOAD_PATH}")
+    # File checks are only relevant in file-driven mode
+    if getattr(config, "INPUT_MODE", "file") == "file":
+        if not config.PROMPT_FILE_PATH.exists():
+            errors.append(f"Prompt file not found: {config.PROMPT_FILE_PATH}")
+        if not config.JSON_PAYLOAD_PATH.exists():
+            errors.append(f"JSON payload not found: {config.JSON_PAYLOAD_PATH}")
 
-    if errors:
-        for err in errors:
-            logger.error(f"[STARTUP] {err}")
-        raise RuntimeError(
-            "Startup validation failed. Fix the above errors before starting the server."
-        )
+        if errors:
+            for err in errors:
+                logger.error(f"[STARTUP] {err}")
+            raise RuntimeError(
+                "Startup validation failed. Fix the above errors before starting the server."
+            )
+    else:
+        logger.info("[STARTUP] Input mode is 'api'. Skipping prompt.md and data.json existence checks.")
 
     # Ensure output directories exist
     config.REPORTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"[STARTUP] Reports directory ready: {config.REPORTS_OUTPUT_DIR}")
-    logger.info(
-        f"[STARTUP] Server ready | model={config.GENERATION_MODEL} "
-        f"| prompt={config.PROMPT_FILE_PATH.name} "
-        f"| payload={config.JSON_PAYLOAD_PATH.name}"
-    )
-
+    
+    if getattr(config, "INPUT_MODE", "file") == "file":
+        logger.info(
+            f"[STARTUP] Server ready | model={config.GENERATION_MODEL} "
+            f"| prompt={config.PROMPT_FILE_PATH.name} "
+            f"| payload={config.JSON_PAYLOAD_PATH.name}"
+        )
+    else:
+        logger.info(
+            f"[STARTUP] Server ready in API mode | model={config.GENERATION_MODEL} "
+            f"| parallel_calls={config.MAX_PARALLEL_CALLS}"
+        )
 
 # ─── Health Check ───────────────────────────────────────────────────────────────
 @app.get("/health", summary="Liveness check")
@@ -88,8 +115,9 @@ async def health():
         "status": "ok",
         "version": "1.0.0",
         "model": config.GENERATION_MODEL,
-        "prompt_file": config.PROMPT_FILE_PATH.name,
-        "payload_file": config.JSON_PAYLOAD_PATH.name,
+        "input_mode": getattr(config, "INPUT_MODE", "file"),
+        "prompt_file": config.PROMPT_FILE_PATH.name if getattr(config, "INPUT_MODE", "file") == "file" else "N/A (API Mode)",
+        "payload_file": config.JSON_PAYLOAD_PATH.name if getattr(config, "INPUT_MODE", "file") == "file" else "N/A (API Mode)",
         "parallel_calls": config.MAX_PARALLEL_CALLS,
     }
 
@@ -100,42 +128,59 @@ async def health():
     summary="Trigger report generation",
     response_description="Returns a .docx report as a file download",
 )
-async def generate_docs(request: Request):
+async def generate_docs(request: Request, payload: Optional[GenerateDocsRequest] = None):
     """
     Triggers the full pipeline:
-      1. Reads prompt.md from disk
-      2. Reads data.json from disk, validates it, converts to markdown summary
+      1. Reads prompt and JSON data (either from API request body or from disk depending on INPUT_MODE)
+      2. Validates and converts JSON data to markdown summary
       3. Fans out parallel Mistral API calls (x3)
       4. Assembles a boardroom-grade .docx
       5. Returns it as a downloadable file
-
-    No request body required — this is a pure trigger endpoint.
-    All inputs are configured on the server via config.py.
     """
     request_id = str(uuid.uuid4())[:8].upper()
     t_start = datetime.datetime.now()
     logger.info(f"[{request_id}] ── New request received from {request.client.host} ──")
 
     try:
-        # ── Step 1: Load prompt from disk ───────────────────────────────────────
-        logger.info(f"[{request_id}] Loading prompt from {config.PROMPT_FILE_PATH.name}")
-        try:
-            prompt_text = config.PROMPT_FILE_PATH.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            logger.error(f"[{request_id}] prompt.md not found at {config.PROMPT_FILE_PATH}")
-            raise HTTPException(status_code=500, detail="Server configuration error: prompt file missing.")
+        input_mode = getattr(config, "INPUT_MODE", "file")
 
-        # ── Step 2: Load and validate JSON payload ──────────────────────────────
-        logger.info(f"[{request_id}] Loading JSON payload from {config.JSON_PAYLOAD_PATH.name}")
-        try:
-            raw_json = config.JSON_PAYLOAD_PATH.read_text(encoding="utf-8")
-            json_data = json.loads(raw_json)
-        except FileNotFoundError:
-            logger.error(f"[{request_id}] data.json not found at {config.JSON_PAYLOAD_PATH}")
-            raise HTTPException(status_code=500, detail="Server configuration error: data file missing.")
-        except json.JSONDecodeError as e:
-            logger.error(f"[{request_id}] data.json is not valid JSON: {e}")
-            raise HTTPException(status_code=500, detail="Server configuration error: data file is not valid JSON.")
+        if input_mode == "api":
+            # API-driven mode: accept prompt and json_payload from the request body
+            if not payload or not payload.prompt or not payload.json_payload:
+                missing_fields = []
+                if not payload:
+                    missing_fields = ["request body"]
+                else:
+                    if not payload.prompt:
+                        missing_fields.append("prompt")
+                    if not payload.json_payload:
+                        missing_fields.append("json_payload")
+                error_msg = f"Missing required parameter(s): {', '.join(missing_fields)}"
+                logger.error(f"[{request_id}] API Validation error: {error_msg}")
+                raise HTTPException(status_code=400, detail=error_msg)
+
+            prompt_text = payload.prompt
+            json_data = payload.json_payload
+            logger.info(f"[{request_id}] Using prompt and JSON payload provided via API.")
+        else:
+            # File-driven mode: read from disk (previous implementation)
+            logger.info(f"[{request_id}] Loading prompt from {config.PROMPT_FILE_PATH.name}")
+            try:
+                prompt_text = config.PROMPT_FILE_PATH.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                logger.error(f"[{request_id}] prompt.md not found at {config.PROMPT_FILE_PATH}")
+                raise HTTPException(status_code=500, detail="Server configuration error: prompt file missing.")
+
+            logger.info(f"[{request_id}] Loading JSON payload from {config.JSON_PAYLOAD_PATH.name}")
+            try:
+                raw_json = config.JSON_PAYLOAD_PATH.read_text(encoding="utf-8")
+                json_data = json.loads(raw_json)
+            except FileNotFoundError:
+                logger.error(f"[{request_id}] data.json not found at {config.JSON_PAYLOAD_PATH}")
+                raise HTTPException(status_code=500, detail="Server configuration error: data file missing.")
+            except json.JSONDecodeError as e:
+                logger.error(f"[{request_id}] data.json is not valid JSON: {e}")
+                raise HTTPException(status_code=500, detail="Server configuration error: data file is not valid JSON.")
 
         # ── Step 3: Summarize JSON → markdown ───────────────────────────────────
         logger.info(f"[{request_id}] Summarizing JSON payload...")
@@ -143,7 +188,10 @@ async def generate_docs(request: Request):
             data_summary_text = clean_data_summary(json_data)
         except ValueError as e:
             logger.error(f"[{request_id}] Payload validation failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Data payload error: {e}")
+            raise HTTPException(
+                status_code=400 if input_mode == "api" else 500, 
+                detail=f"Data payload error: {e}"
+            )
 
         # ── Step 4: Generate report ──────────────────────────────────────────────
         timestamp = t_start.strftime("%Y%m%d_%H%M%S")
