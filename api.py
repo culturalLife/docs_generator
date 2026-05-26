@@ -20,8 +20,7 @@ import json
 import uuid
 import datetime
 from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -128,14 +127,21 @@ async def health():
     summary="Trigger report generation",
     response_description="Returns a .docx report as a file download",
 )
-async def generate_docs(request: Request, payload: Optional[GenerateDocsRequest] = None):
+async def generate_docs(
+    request: Request,
+    prompt: Optional[str] = Form(None),
+    prompt_file: Optional[UploadFile] = File(None),
+    json_payload: Optional[str] = Form(None),
+    json_file: Optional[UploadFile] = File(None)
+):
     """
     Triggers the full pipeline:
-      1. Reads prompt and JSON data (either from API request body or from disk depending on INPUT_MODE)
-      2. Validates and converts JSON data to markdown summary
-      3. Fans out parallel Mistral API calls (x3)
-      4. Assembles a boardroom-grade .docx
-      5. Returns it as a downloadable file
+      1. Reads prompt (from file upload or textbox form field)
+      2. Reads JSON payload (from file upload or raw JSON textbox form field)
+      3. Validates and converts JSON data to markdown summary
+      4. Fans out parallel Mistral API calls (x3)
+      5. Assembles a boardroom-grade .docx
+      6. Returns it as a downloadable file
     """
     request_id = str(uuid.uuid4())[:8].upper()
     t_start = datetime.datetime.now()
@@ -145,23 +151,43 @@ async def generate_docs(request: Request, payload: Optional[GenerateDocsRequest]
         input_mode = getattr(config, "INPUT_MODE", "file")
 
         if input_mode == "api":
-            # API-driven mode: accept prompt and json_payload from the request body
-            if not payload or not payload.prompt or not payload.json_payload:
-                missing_fields = []
-                if not payload:
-                    missing_fields = ["request body"]
-                else:
-                    if not payload.prompt:
-                        missing_fields.append("prompt")
-                    if not payload.json_payload:
-                        missing_fields.append("json_payload")
-                error_msg = f"Missing required parameter(s): {', '.join(missing_fields)}"
-                logger.error(f"[{request_id}] API Validation error: {error_msg}")
-                raise HTTPException(status_code=400, detail=error_msg)
+            # 1. Resolve prompt
+            if prompt_file is not None and prompt_file.filename != "":
+                logger.info(f"[{request_id}] Reading prompt from uploaded file: {prompt_file.filename}")
+                prompt_bytes = await prompt_file.read()
+                prompt_text = prompt_bytes.decode("utf-8")
+            elif prompt is not None and prompt.strip() != "":
+                logger.info(f"[{request_id}] Reading prompt from text form parameter.")
+                prompt_text = prompt
+            else:
+                logger.error(f"[{request_id}] API Validation error: Missing 'prompt' Form field or 'prompt_file' upload.")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Please provide a prompt (either upload a file under 'prompt_file' or paste text under 'prompt')."
+                )
 
-            prompt_text = payload.prompt
-            json_data = payload.json_payload
-            logger.info(f"[{request_id}] Using prompt and JSON payload provided via API.")
+            # 2. Resolve JSON payload
+            if json_file is not None and json_file.filename != "":
+                logger.info(f"[{request_id}] Reading JSON from uploaded file: {json_file.filename}")
+                json_bytes = await json_file.read()
+                try:
+                    json_data = json.loads(json_bytes.decode("utf-8"))
+                except json.JSONDecodeError as e:
+                    logger.error(f"[{request_id}] API Validation error: Uploaded JSON file is not valid: {e}")
+                    raise HTTPException(status_code=400, detail=f"Uploaded file is not valid JSON: {e}")
+            elif json_payload is not None and json_payload.strip() != "":
+                logger.info(f"[{request_id}] Reading JSON from text form parameter.")
+                try:
+                    json_data = json.loads(json_payload)
+                except json.JSONDecodeError as e:
+                    logger.error(f"[{request_id}] API Validation error: Pasted JSON payload is not valid: {e}")
+                    raise HTTPException(status_code=400, detail=f"Pasted JSON text is not valid JSON: {e}")
+            else:
+                logger.error(f"[{request_id}] API Validation error: Missing 'json_payload' Form field or 'json_file' upload.")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Please provide JSON data (either upload a file under 'json_file' or paste raw JSON under 'json_payload')."
+                )
         else:
             # File-driven mode: read from disk (previous implementation)
             logger.info(f"[{request_id}] Loading prompt from {config.PROMPT_FILE_PATH.name}")
