@@ -23,7 +23,7 @@ INPUT_MODE: str = "api"
 # ─── Model Settings ────────────────────────────────────────────────────────────
 # Which Mistral model to use for report generation.
 # Options: "mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"
-GENERATION_MODEL: str = "mistral-medium-latest"
+GENERATION_MODEL: str = "mistral-large-latest"
 
 # LLM temperature. 0.0 = deterministic, 1.0 = creative.
 TEMPERATURE: float = 0.2

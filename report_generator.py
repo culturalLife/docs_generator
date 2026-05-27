@@ -45,8 +45,15 @@ if not _api_key:
     raise EnvironmentError(
         "MISTRAL_API_KEY not found. Set it in the .env file or as an environment variable on the VM."
     )
-client = Mistral(api_key=_api_key)
-logger.info(f"Mistral client initialized | model={config.GENERATION_MODEL}")
+
+# Raise the httpx read timeout so long mistral-large-latest calls don't hit the
+# default ~60s cutoff. MISTRAL_READ_TIMEOUT can be overridden via the .env file.
+_READ_TIMEOUT: float = float(os.environ.get("MISTRAL_READ_TIMEOUT", "300"))
+client = Mistral(api_key=_api_key, timeout_ms=int(_READ_TIMEOUT * 1000))
+logger.info(
+    f"Mistral client initialized | model={config.GENERATION_MODEL} "
+    f"| read_timeout={_READ_TIMEOUT:.0f}s"
+)
 
 
 # ─── Retry Helper ──────────────────────────────────────────────────────────────

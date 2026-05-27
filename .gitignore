@@ -16,6 +16,10 @@ ENV/
 logs/
 reports/
 
+# ─── Not part of this service ──────────────────────────────────────────────────
+# VMCompatible is backend-only. The frontend lives in docs_gen/frontend.
+frontend/
+
 # ─── OS Files ─────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
